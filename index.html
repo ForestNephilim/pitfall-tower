@@ -1,0 +1,744 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Pitfall Tower">
+<meta name="theme-color" content="#08080f">
+<title>PITFALL TOWER</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+  *,*::before,*::after{margin:0;padding:0;box-sizing:border-box;}
+  html,body{width:100%;height:100%;background:#050509;display:flex;align-items:center;justify-content:center;overflow:hidden;font-family:'Press Start 2P',monospace;}
+  canvas{display:block;image-rendering:pixelated;image-rendering:crisp-edges;touch-action:none;}
+</style>
+</head>
+<body>
+<canvas id="C"></canvas>
+<script>
+// ═══════════════════════════════════════════════════════════════════
+// PITFALL TOWER
+// Dark dungeon crawler — climb the tower, avoid the pitfalls
+// ═══════════════════════════════════════════════════════════════════
+
+const C = document.getElementById('C');
+const X = C.getContext('2d');
+const BASE_W = 360, BASE_H = 640;
+let SCALE = 1;
+function resize(){
+  SCALE = Math.min(window.innerWidth/BASE_W, window.innerHeight/BASE_H);
+  C.style.width  = (BASE_W*SCALE)+'px';
+  C.style.height = (BASE_H*SCALE)+'px';
+  C.width = BASE_W; C.height = BASE_H;
+}
+resize(); window.addEventListener('resize', resize);
+
+// ── PALETTE ──────────────────────────────────────────────────────────
+const P = {
+  BG:       '#06060e',  SHELL:    '#12101c',  WALL:     '#1e1c2a',
+  FLOOR_BG: '#16141f',  STONE:    '#2e2c40',  STONE_LT: '#3e3c54',
+  PURPLE:   '#5a3578',  PURPLE_LT:'#8a5aaa',
+  AMBER:    '#c07820',  AMBER_DIM:'#5a3808',  AMBER_LT: '#e09830',
+  TEXT:     '#b8b5cc',  DIM:      '#4a4860',  VERY_DIM: '#252338',
+  PIT:      '#4a0f0f',  PIT_LT:   '#9a2020',  PIT_GLW:  '#cc3030',
+  STAIR:    '#0f3a1a',  STAIR_LT: '#2a8a3a',  STAIR_GLW:'#4acc5a',
+  MM_CUR:   '#c07820',  MM_VIS:   '#302e44',  MM_PIT:   '#7a1010',
+  MM_STR:   '#1a5a20',  MM_UNV:   '#0c0b14',  MM_SEN:   '#cc2828',
+};
+
+// ── LAYOUT ───────────────────────────────────────────────────────────
+const SCR  = { x:20,  y:50,  w:320, h:340 };
+const ROOM = { x:SCR.x+20, y:SCR.y+18, w:SCR.w-40, h:SCR.h-32 };
+const WT   = 28;
+const FL   = { x:ROOM.x+WT, y:ROOM.y+WT, w:ROOM.w-WT*2, h:ROOM.h-WT*2 };
+const FCX  = ROOM.x+ROOM.w/2|0;
+const FCY  = ROOM.y+ROOM.h/2|0;
+const HUD_Y = SCR.y + SCR.h + 8;
+const DW   = 26;
+
+// ── GAME CONFIG ───────────────────────────────────────────────────────
+const GS = 8;
+const STAIR_THRESH = 0.60;
+function pitCount(floor){ return floor<=1 ? 0 : Math.min(6+Math.floor((floor-1)*0.85), 18); }
+function sentryDelay(floor){ return Math.max(4, 14-floor); }
+
+// ── STATE ─────────────────────────────────────────────────────────────
+
+// ── SEEDED RNG (mulberry32) ───────────────────────────────────────────
+let rngState = 0;
+function seedRng(s){ rngState = s>>>0; }
+function rng(){
+  rngState = (rngState + 0x6D2B79F5)|0;
+  let t = Math.imul(rngState ^ rngState>>>15, 1|rngState);
+  t = t + Math.imul(t ^ t>>>7, 61|t) ^ t;
+  return ((t ^ t>>>14)>>>0)/4294967296;
+}
+function ri(n){ return Math.floor(rng()*n); }
+
+// ── STATE ─────────────────────────────────────────────────────────────
+let screen    = 'title';
+let gameMode  = 'endless';
+let grid, px, py, phase = 'play', frame = 0;
+let floorNum  = 1, maxFloor = 1, falls = 0, moveCounter = 0;
+let totalSafe = 0, visitedSafeCount = 0;
+let stairX = -1, stairY = -1;
+let keyX = -1, keyY = -1, hasKey = false; // stealth mode
+let sentries = [], sentryFloor = 0, sentryFollowIn = 0;
+let timerSecs = 0;
+let timerHandle = null;
+let runSeed = 0;
+let isDailyMode = false;
+let soundOn = true;
+let newRecordFlag = false;
+let flagMode = false;
+let flagModeAnim = 0;
+let records = {};
+
+// ── HELPERS ───────────────────────────────────────────────────────────
+function cell(x,y){ if(x<0||x>=GS||y<0||y>=GS) return null; return grid[y*GS+x]; }
+function nb(x,y,d){
+  if(d==='n') return [x,y-1]; if(d==='s') return [x,y+1];
+  if(d==='w') return [x-1,y]; return [x+1,y];
+}
+function pitAdj(x,y){ let n=0; for(const d of ['n','s','e','w']){ const [nx,ny]=nb(x,y,d); if(cell(nx,ny)?.pit) n++; } return n; }
+function inBounds(x,y){ return x>=0&&x<GS&&y>=0&&y<GS; }
+
+// ── DAILY SEED ────────────────────────────────────────────────────────
+function todayStr(){ const d=new Date(); return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`; }
+function dailySeed(){ const s=todayStr(); let h=0x811c9dc5; for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,0x01000193)>>>0;} return h^0xdeadbeef; }
+
+// ── RECORDS ───────────────────────────────────────────────────────────
+function loadRecords(){ try{ records=JSON.parse(localStorage.getItem('pt-records')||'{}'); }catch(e){ records={}; } }
+function saveRecord(key, val){
+  const ex = records[key];
+  let isNew = !ex || val > ex.val;
+  if(isNew){ records[key]={val, date:new Date().toLocaleDateString()}; try{ localStorage.setItem('pt-records',JSON.stringify(records)); }catch(e){} }
+  return isNew;
+}
+
+// ── SOUNDS ────────────────────────────────────────────────────────────
+let audioCtx = null;
+function getAC(){ if(!audioCtx) try{ audioCtx=new(window.AudioContext||window.webkitAudioContext)(); }catch(e){} return audioCtx; }
+function tone(freq,type,dur,vol=0.14,delay=0){
+  const ac=getAC(); if(!ac||!soundOn) return;
+  const o=ac.createOscillator(), g=ac.createGain();
+  o.connect(g); g.connect(ac.destination);
+  o.type=type; o.frequency.value=freq;
+  const t=ac.currentTime+delay;
+  g.gain.setValueAtTime(vol,t); g.gain.exponentialRampToValueAtTime(0.001,t+dur);
+  o.start(t); o.stop(t+dur+0.01);
+}
+function sndStep()  { tone(160,'square',0.04,0.07); }
+function sndFlag()  { tone(320,'square',0.05,0.09); tone(240,'square',0.05,0.06,0.04); }
+function sndKey()   { [440,554,659,880].forEach((f,i)=>tone(f,'triangle',0.1,0.18,i*0.06)); }
+function sndLocked(){ tone(180,'square',0.08,0.14); tone(120,'square',0.12,0.14,0.07); }
+function sndFall(){
+  const ac=getAC(); if(!ac||!soundOn) return;
+  const o=ac.createOscillator(), g=ac.createGain();
+  o.connect(g); g.connect(ac.destination); o.type='sawtooth';
+  o.frequency.setValueAtTime(350,ac.currentTime);
+  o.frequency.exponentialRampToValueAtTime(70,ac.currentTime+0.45);
+  g.gain.setValueAtTime(0.22,ac.currentTime); g.gain.exponentialRampToValueAtTime(0.001,ac.currentTime+0.5);
+  o.start(); o.stop(ac.currentTime+0.5);
+  tone(50,'sine',0.35,0.2,0.1);
+}
+function sndAscend() { [294,370,440,587].forEach((f,i)=>tone(f,'square',0.1,0.14,i*0.07)); }
+function sndCaught() { [740,440,260,140].forEach((f,i)=>tone(f,'square',0.1,0.18,i*0.08)); }
+function sndGameOver(){ tone(220,'sawtooth',0.3,0.15); tone(165,'sawtooth',0.4,0.15,0.15); }
+
+// ── BUILD FLOOR ───────────────────────────────────────────────────────
+function buildFloor(floor){
+  const NP = pitCount(floor);
+  seedRng(((runSeed>>>0) ^ (Math.imul(floor, 0x9e3779b9)>>>0))>>>0);
+
+  while(true){
+    grid = Array.from({length:GS*GS}, ()=>({
+      pit:false, visited:false, stair:false, key:false,
+      flags:{n:false,s:false,e:false,w:false}, pitSeen:false
+    }));
+
+    const safe = new Set();
+    for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++) safe.add(`${dx},${dy}`);
+
+    let placed=0;
+    while(placed<NP){
+      const x=ri(GS), y=ri(GS);
+      if(!cell(x,y).pit && !safe.has(`${x},${y}`)){ cell(x,y).pit=true; placed++; }
+    }
+
+    // BFS connectivity check
+    const reach = new Set(['0,0']);
+    const q = [[0,0]];
+    while(q.length){ const [cx,cy]=q.shift(); for(const d of ['n','s','e','w']){ const [nx,ny]=nb(cx,cy,d); if(!inBounds(nx,ny)) continue; const k=`${nx},${ny}`; if(reach.has(k)||cell(nx,ny).pit) continue; reach.add(k); q.push([nx,ny]); } }
+    if(reach.size >= GS*GS-NP) break;
+    seedRng(((runSeed>>>0) ^ (Math.imul(floor,0x9e3779b9)>>>0) + placed)>>>0);
+  }
+
+  // Collect all safe non-start cells and shuffle
+  const safeCells = [];
+  for(let y=0;y<GS;y++) for(let x=0;x<GS;x++)
+    if(!cell(x,y).pit && !(x===0&&y===0)) safeCells.push([x,y]);
+  for(let i=safeCells.length-1;i>0;i--){ const j=ri(i+1); [safeCells[i],safeCells[j]]=[safeCells[j],safeCells[i]]; }
+
+  // Stairs go to a cell far from start (second half of shuffled list biased far)
+  const farCells = safeCells.filter(([x,y])=>x+y>=3);
+  const stairCell = farCells.length ? farCells[ri(farCells.length)] : safeCells[0];
+  [stairX, stairY] = stairCell;
+  cell(stairX, stairY).stair = true;
+
+  // Key for stealth mode — placed far from both start and stairs
+  if(gameMode==='stealth'){
+    const keyCands = safeCells.filter(([x,y])=>
+      !(x===stairX&&y===stairY) && (Math.abs(x-stairX)+Math.abs(y-stairY))>=3
+    );
+    const keyCell = keyCands.length ? keyCands[ri(keyCands.length)] : safeCells[safeCells.length-1];
+    [keyX, keyY] = keyCell;
+    cell(keyX, keyY).key = true;
+    hasKey = false;
+  } else {
+    keyX=-1; keyY=-1; hasKey=false;
+  }
+
+  totalSafe = GS*GS - NP;
+  stairRevealed = true; // stairs always placed at start — always on map
+  px=0; py=0;
+  cell(0,0).visited = true;
+  visitedSafeCount = 1;
+}
+
+// ── START / RESTART ───────────────────────────────────────────────────
+function startGame(){
+  floorNum=1; maxFloor=1; falls=0; moveCounter=0;
+  sentries=[]; sentryFloor=0; sentryFollowIn=0;
+  newRecordFlag=false; flagMode=false; flagModeAnim=0; phase='play';
+  hasKey=false; keyX=-1; keyY=-1;
+  runSeed = isDailyMode ? dailySeed() : (Math.random()*0xFFFFFFFF)>>>0;
+  buildFloor(1);
+  // Stealth: sentry present from floor 1
+  if(gameMode==='stealth'){ spawnSentry(); }
+  if(gameMode==='timed'){ timerSecs=180; startTimer(); } else stopTimer();
+  screen='game';
+}
+
+function startTimer(){ stopTimer(); timerHandle=setInterval(()=>{ if(phase==='play'){ timerSecs--; if(timerSecs<=0){ timerSecs=0; endRun(); } } },1000); }
+function stopTimer(){ clearInterval(timerHandle); timerHandle=null; }
+
+function endRun(){
+  stopTimer();
+  if(phase==='play'||phase==='ascending'){ sndGameOver(); }
+  phase='gameover';
+  const key = isDailyMode?'daily':gameMode;
+  newRecordFlag = saveRecord(key, maxFloor);
+}
+
+// ── SENTRY ────────────────────────────────────────────────────────────
+function sentryBFS(sx,sy,others){
+  if(sx===px&&sy===py) return [sx,sy];
+  const vis=new Set([`${sx},${sy}`]); const q=[];
+  for(const d of ['n','s','e','w']){ const [nx,ny]=nb(sx,sy,d); if(!inBounds(nx,ny)||cell(nx,ny)?.pit) continue; const k=`${nx},${ny}`; if(vis.has(k)) continue; vis.add(k); q.push([nx,ny,nx,ny]); }
+  while(q.length){
+    const [cx,cy,fx,fy]=q.shift();
+    if(cx===px&&cy===py) return [fx,fy];
+    for(const d of ['n','s','e','w']){ const [nx,ny]=nb(cx,cy,d); if(!inBounds(nx,ny)||cell(nx,ny)?.pit) continue; if(others.has(`${nx},${ny}`)&&!(nx===px&&ny===py)) continue; const k=`${nx},${ny}`; if(vis.has(k)) continue; vis.add(k); q.push([nx,ny,fx,fy]); }
+  }
+  return [sx,sy];
+}
+
+function sentryPatrol(s, others){
+  // Wander randomly — prefer not to backtrack, avoid pits and other sentries
+  const dirs=['n','s','e','w']; const shuffled=dirs.sort(()=>Math.random()-0.5);
+  for(const d of shuffled){
+    const [nx,ny]=nb(s.x,s.y,d);
+    if(!inBounds(nx,ny)||cell(nx,ny)?.pit) continue;
+    if(others.has(`${nx},${ny}`)) continue;
+    return [nx,ny];
+  }
+  return [s.x,s.y];
+}
+
+function moveSentries(){
+  if(sentryFloor!==floorNum) return;
+  for(let i=0;i<sentries.length;i++){
+    const s=sentries[i];
+    const others=new Set(sentries.filter((_,j)=>j!==i).map(o=>`${o.x},${o.y}`));
+    const manhattan=Math.abs(s.x-px)+Math.abs(s.y-py);
+    // Stealth: patrol randomly until within 2 squares, then chase
+    const isChasing = gameMode==='stealth' ? manhattan<=2 : true;
+    const [nx,ny]=isChasing ? sentryBFS(s.x,s.y,others) : sentryPatrol(s,others);
+    s.x=nx; s.y=ny;
+    if(s.x===px&&s.y===py){
+      sndCaught();
+      if(gameMode==='stealth'){ endRun(); phase='caught'; }
+      else { endRun(); phase='caught'; }
+      return;
+    }
+  }
+}
+
+function spawnSentry(){
+  const corners=[[GS-1,GS-1],[GS-1,0],[0,GS-1],[GS-2,GS-2],[GS-2,0],[0,GS-2]];
+  for(const [cx,cy] of corners){ if(!cell(cx,cy)?.pit){ sentries=[{x:cx,y:cy}]; sentryFloor=floorNum; return; } }
+}
+
+// ── MOVEMENT ─────────────────────────────────────────────────────────
+function doMove(dx,dy){
+  if(phase!=='play') return;
+  const nx=px+dx, ny=py+dy;
+  if(!inBounds(nx,ny)) return;
+
+  // Stealth: stair room locked without key — block entry
+  if(gameMode==='stealth' && !hasKey && cell(nx,ny)?.stair) {
+    sndLocked(); return;
+  }
+
+  px=nx; py=ny; moveCounter++;
+  const c=cell(px,py);
+
+  if(c.pit){
+    c.pitSeen=true; c.visited=true; falls++;
+    sndFall();
+    if(gameMode==='timed') timerSecs=Math.max(0,timerSecs-20);
+    if(floorNum<=1){ endRun(); return; }
+    const prevSentryFloor = sentryFloor;
+    hasKey = false; // lose key on fall
+    floorNum--;
+    buildFloor(floorNum);
+    if(gameMode==='stealth') spawnSentry();
+    if(prevSentryFloor>floorNum) sentryFloor=prevSentryFloor;
+    phase='fell';
+    return;
+  }
+
+  if(!c.visited){ c.visited=true; visitedSafeCount++; }
+
+  // Collect key in stealth mode
+  if(c.key && !hasKey){
+    hasKey=true; c.key=false;
+    sndKey();
+  }
+
+  sndStep();
+
+  // Enter stairs
+  if(c.stair){
+    floorNum++; if(floorNum>maxFloor) maxFloor=floorNum;
+    sndAscend();
+    if(gameMode==='sentry' && sentries.length===0 && floorNum>=4) spawnSentry();
+    if(sentries.length && sentryFloor===floorNum-1) sentryFollowIn=sentryDelay(floorNum);
+    buildFloor(floorNum);
+    if(gameMode==='stealth') spawnSentry();
+    phase='ascending';
+    return;
+  }
+
+  // Sentry follow tick (non-stealth)
+  if(gameMode!=='stealth' && sentries.length && sentryFloor<floorNum && sentryFollowIn>0){
+    sentryFollowIn--;
+    if(sentryFollowIn===0){
+      sentryFloor=floorNum;
+      const corners=[[GS-1,GS-1],[GS-1,0],[0,GS-1]];
+      for(const [cx,cy] of corners){ if(!cell(cx,cy)?.pit){ sentries[0]={x:cx,y:cy}; break; } }
+    }
+  }
+
+  // Move sentries — stealth always, others only if on same floor
+  if(phase==='play' && sentries.length && sentryFloor===floorNum) moveSentries();
+}
+
+function doFlag(dx,dy){
+  if(phase!=='play') return;
+  const d = dx===0?(dy<0?'n':'s'):(dx<0?'w':'e');
+  cell(px,py).flags[d] = !cell(px,py).flags[d];
+  sndFlag();
+}
+
+// ── INPUT ─────────────────────────────────────────────────────────────
+const menuBtns=[]; const gameBtns={};
+function regBtn(id,x,y,w,h,fn){ menuBtns.push({id,x,y,w,h,fn}); }
+function tapMenu(tx,ty){ for(const b of menuBtns){ if(tx>=b.x&&tx<=b.x+b.w&&ty>=b.y&&ty<=b.y+b.h){ b.fn(); return; } } }
+
+let tx0,ty0,tt0,hTimer=null,hFired=false;
+const HOLD_MS=450, SWIPE=28;
+function gpos(cx,cy){ const r=C.getBoundingClientRect(); return {x:(cx-r.left)/SCALE,y:(cy-r.top)/SCALE}; }
+
+C.addEventListener('touchstart',e=>{
+  e.preventDefault(); const t=e.touches[0]; tx0=t.clientX; ty0=t.clientY; tt0=Date.now(); hFired=false;
+  clearTimeout(hTimer); hTimer=setTimeout(()=>{ hFired=true; flagMode=true; navigator.vibrate&&navigator.vibrate(55); },HOLD_MS);
+},{passive:false});
+C.addEventListener('touchmove',e=>{ e.preventDefault(); const t=e.touches[0]; if(Math.hypot(t.clientX-tx0,t.clientY-ty0)>15) clearTimeout(hTimer); },{passive:false});
+C.addEventListener('touchend',e=>{
+  e.preventDefault(); clearTimeout(hTimer);
+  const t=e.changedTouches[0]; const pos=gpos(t.clientX,t.clientY);
+  const dx=t.clientX-tx0, dy=t.clientY-ty0; const dist=Math.hypot(dx,dy);
+
+  if(screen==='title'||screen==='records'){ if(dist<20) tapMenu(pos.x,pos.y); return; }
+
+  if(screen==='game'){
+    if(phase==='ascending'||phase==='fell'){ if(dist<14){ phase='play'; return; } }
+    if(phase==='gameover'||phase==='caught'){ if(dist<14){ screen='title'; stopTimer(); return; } }
+    // Game buttons
+    if(dist<16){ const b=Object.values(gameBtns).find(b=>pos.x>=b.x&&pos.x<=b.x+b.w&&pos.y>=b.y&&pos.y<=b.y+b.h); if(b){ b.fn(); return; } }
+    if(dist<12&&pos.y<HUD_Y){ flagMode=!flagMode; return; }
+    if(dist>=SWIPE){
+      const ang=Math.atan2(dy,dx)*180/Math.PI;
+      let mdx=0,mdy=0;
+      if(ang>-45&&ang<=45) mdx=1; else if(ang>45&&ang<=135) mdy=1; else if(ang>135||ang<=-135) mdx=-1; else mdy=-1;
+      if(hFired||flagMode){ doFlag(mdx,mdy); flagMode=false; } else doMove(mdx,mdy);
+    }
+  }
+},{passive:false});
+
+document.addEventListener('keydown',e=>{
+  if(screen!=='game') return;
+  if(phase==='ascending'||phase==='fell'){ if(e.code==='Space'||e.code==='Enter') phase='play'; return; }
+  if(phase==='gameover'||phase==='caught'){ if(e.code==='Space'){ screen='title'; stopTimer(); } return; }
+  const m={'ArrowUp':[0,-1],'ArrowDown':[0,1],'ArrowLeft':[-1,0],'ArrowRight':[1,0],'KeyW':[0,-1],'KeyS':[0,1],'KeyA':[-1,0],'KeyD':[1,0]};
+  if(m[e.code]){ const [dx,dy]=m[e.code]; doMove(dx,dy); }
+});
+
+// ── DRAW HELPERS ──────────────────────────────────────────────────────
+function r(x,y,w,h,fill,stroke,lw){ if(fill){X.fillStyle=fill;X.fillRect(x,y,w,h);} if(stroke){X.strokeStyle=stroke;X.lineWidth=lw||1;X.strokeRect(x,y,w,h);} }
+function t(s,x,y,col,sz,align,base){ X.font=`${sz}px 'Press Start 2P'`; X.textAlign=align||'center'; X.textBaseline=base||'middle'; X.fillStyle=col; X.fillText(s,x,y); }
+function glow(c,b){ X.shadowColor=c; X.shadowBlur=b; }
+
+// ── TITLE SCREEN ──────────────────────────────────────────────────────
+function drawTitle(){
+  menuBtns.length=0;
+  r(0,0,BASE_W,BASE_H,P.BG); r(10,10,BASE_W-20,BASE_H-20,P.SHELL,P.STONE,2);
+  r(SCR.x-4,SCR.y-4,SCR.w+8,SCR.h+8,P.STONE);
+  r(SCR.x,SCR.y,SCR.w,SCR.h,P.WALL);
+  r(SCR.x+6,SCR.y+6,SCR.w-12,SCR.h-12,P.FLOOR_BG);
+
+  // Title with amber glow
+  glow(P.AMBER,14); t('PITFALL',BASE_W/2,SCR.y+46,P.AMBER,15); glow(0,0);
+  t('TOWER',BASE_W/2,SCR.y+70,P.TEXT,15);
+  // Torch flicker dots
+  const tf=0.6+0.4*Math.abs(Math.sin(frame*0.07));
+  X.globalAlpha=tf; r(SCR.x+18,SCR.y+10,8,16,P.AMBER_DIM); r(SCR.x+18,SCR.y+6,4,6,P.AMBER_LT);
+  r(SCR.x+SCR.w-26,SCR.y+10,8,16,P.AMBER_DIM); r(SCR.x+SCR.w-24,SCR.y+6,4,6,P.AMBER_LT);
+  X.globalAlpha=1;
+
+  r(SCR.x+20,SCR.y+84,SCR.w-40,2,P.STONE);
+
+  const bW=240,bH=32,bX=(BASE_W-bW)/2;
+  const modes=[
+    {k:'endless', l:'ENDLESS CLIMB',  s:'HOW HIGH CAN YOU GO?',      y:SCR.y+98},
+    {k:'timed',   l:'TIMED ASCENT',   s:'3 MINS · FALLS COST TIME',  y:SCR.y+138},
+    {k:'stealth', l:'STEALTH',         s:'FIND KEY · AVOID SENTRY',   y:SCR.y+178},
+    {k:'sentry',  l:'SENTRY MODE',    s:'HUNTED ACROSS FLOORS',       y:SCR.y+218},
+    {k:'daily',   l:'DAILY TOWER',    s:'NEW TOWER EVERY DAY',        y:SCR.y+258},
+  ];
+  for(const m of modes){
+    const isStealth = m.k==='stealth';
+    r(bX,m.y,bW,bH,isStealth?P.PURPLE:P.WALL, P.STONE,2);
+    r(bX+2,m.y+2,bW-4,2,isStealth?P.PURPLE_LT:P.STONE);
+    t(m.l,BASE_W/2,m.y+11,isStealth?P.PURPLE_LT:P.TEXT,8);
+    t(m.s,BASE_W/2,m.y+24,P.DIM,5);
+    regBtn(m.k,bX,m.y,bW,bH,()=>{ gameMode=m.k; isDailyMode=(m.k==='daily'); startGame(); });
+  }
+
+  const bestKey = isDailyMode?'daily':gameMode;
+  const best = records[bestKey] || records['endless'];
+  if(best) { glow(P.AMBER,6); t(`BEST: FLOOR ${best.val}`,BASE_W/2,SCR.y+300,P.AMBER,7); glow(0,0); }
+
+  if(Math.floor(frame/22)%2===0) t('TAP TO SELECT',BASE_W/2,SCR.y+SCR.h-18,P.DIM,7);
+
+  // Footer buttons
+  const fy=SCR.y+SCR.h+20, fw=100, fgap=8, fx=(BASE_W-(fw*2+fgap))/2;
+  r(fx,fy,fw,22,P.SHELL,P.STONE,1); t('★ RECORDS',fx+fw/2,fy+11,P.AMBER,5);
+  regBtn('rec',fx,fy,fw,22,()=>{ screen='records'; });
+  r(fx+fw+fgap,fy,fw,22,P.SHELL,P.STONE,1); t(soundOn?'♪ SOUND ON':'♪ OFF',fx+fw+fgap+fw/2,fy+11,soundOn?P.DIM:P.STONE,5);
+  regBtn('snd',fx+fw+fgap,fy,fw,22,()=>{ soundOn=!soundOn; });
+}
+
+// ── RECORDS SCREEN ────────────────────────────────────────────────────
+function drawRecords(){
+  menuBtns.length=0;
+  r(0,0,BASE_W,BASE_H,P.BG); r(10,10,BASE_W-20,BASE_H-20,P.SHELL,P.STONE,2);
+  r(SCR.x-4,SCR.y-4,SCR.w+8,SCR.h+8,P.STONE);
+  r(SCR.x,SCR.y,SCR.w,SCR.h,P.WALL);
+  r(SCR.x+6,SCR.y+6,SCR.w-12,SCR.h-12,P.FLOOR_BG);
+  glow(P.AMBER,8); t('★ RECORDS',BASE_W/2,SCR.y+34,P.AMBER,10); glow(0,0);
+  r(SCR.x+20,SCR.y+52,SCR.w-40,2,P.STONE);
+  const entries=[{k:'endless',l:'ENDLESS'},{k:'timed',l:'TIMED'},{k:'stealth',l:'STEALTH'},{k:'sentry',l:'SENTRY'},{k:'daily',l:'DAILY'}];
+  const rH=32,rY=SCR.y+66;
+  entries.forEach((e,i)=>{
+    const ry=rY+i*rH; if(i%2===0) r(SCR.x+6,ry,SCR.w-12,rH,P.WALL);
+    t(e.l,SCR.x+14,ry+rH/2,P.TEXT,7,'left');
+    const rec=records[e.k];
+    if(rec){ glow(P.AMBER,4); t(`FL.${rec.val}`,SCR.x+SCR.w-14,ry+rH/2,P.AMBER,9,'right'); glow(0,0); t(rec.date||'',BASE_W/2+14,ry+rH/2,P.DIM,5); }
+    else t('---',SCR.x+SCR.w-14,ry+rH/2,P.DIM,7,'right');
+  });
+  const by=SCR.y+SCR.h+22;
+  r((BASE_W-100)/2,by-10,100,26,P.WALL,P.STONE,1); t('← BACK',BASE_W/2,by+3,P.TEXT,7);
+  regBtn('back',(BASE_W-100)/2,by-10,100,26,()=>{ screen='title'; });
+}
+
+// ── ROOM DRAWING ─────────────────────────────────────────────────────
+function drawRoom(){
+  const c=cell(px,py); const num=pitAdj(px,py);
+
+  r(FL.x,FL.y,FL.w,FL.h,P.FLOOR_BG);
+  // Walls
+  r(ROOM.x,ROOM.y,ROOM.w,WT,P.WALL); r(ROOM.x,ROOM.y+ROOM.h-WT,ROOM.w,WT,P.WALL);
+  r(ROOM.x,ROOM.y,WT,ROOM.h,P.WALL); r(ROOM.x+ROOM.w-WT,ROOM.y,WT,ROOM.h,P.WALL);
+  // Stone texture
+  X.globalAlpha=0.12;
+  for(let ty=ROOM.y+5;ty<ROOM.y+ROOM.h;ty+=12) for(let tx=ROOM.x+5;tx<ROOM.x+ROOM.w;tx+=12)
+    if(Math.sin(tx*0.4+ty*0.6)>0.65) r(tx,ty,3,3,P.STONE);
+  X.globalAlpha=1;
+  // Corner blocks
+  [[ROOM.x,ROOM.y],[ROOM.x+ROOM.w-10,ROOM.y],[ROOM.x,ROOM.y+ROOM.h-10],[ROOM.x+ROOM.w-10,ROOM.y+ROOM.h-10]]
+    .forEach(([cx2,cy2])=>r(cx2,cy2,10,10,P.STONE));
+  // Torch glow
+  const grd=X.createRadialGradient(FCX,FCY,0,FCX,FCY,FL.w*0.8);
+  grd.addColorStop(0,`rgba(192,120,32,${0.08+0.04*Math.abs(Math.sin(frame*0.04))})`);
+  grd.addColorStop(1,'rgba(192,120,32,0)');
+  X.fillStyle=grd; X.fillRect(FL.x,FL.y,FL.w,FL.h);
+
+  // Floor content
+  if(c.pit&&c.pitSeen){
+    X.globalAlpha=0.7; r(FL.x+8,FL.y+8,FL.w-16,FL.h-16,P.PIT); X.globalAlpha=1;
+    glow(P.PIT_GLW,8); t('▼',FCX,FCY,P.PIT_LT,56); glow(0,0);
+  } else if(c.key&&!hasKey){
+    // Key room — amber sparkle
+    glow(P.AMBER,12); t('✦',FL.x+FL.w-28,FL.y+38,P.AMBER,52); glow(0,0);
+  } else if(c.stair){
+    glow(P.STAIR_GLW,8); t('▲',FL.x+FL.w-28,FL.y+38,P.STAIR_LT,52); glow(0,0);
+  } else if(num===0){
+    X.globalAlpha=0.08;
+    for(let ty2=FL.y+8;ty2<FL.y+FL.h-4;ty2+=14) for(let tx2=FL.x+8;tx2<FL.x+FL.w-4;tx2+=14) r(tx2,ty2,3,3,P.STONE);
+    X.globalAlpha=1;
+  } else {
+    X.globalAlpha=0.16; r(FL.x,FL.y,FL.w,FL.h,num>=3?P.PIT:P.STONE); X.globalAlpha=1;
+    X.globalAlpha=0.52; t(String(num),FCX,FCY+2,num>=3?P.PIT_LT:P.TEXT,80); X.globalAlpha=1;
+    X.globalAlpha=0.14; t(String(num),FCX-2,FCY,P.BG,80); X.globalAlpha=1;
+  }
+
+  // Doors
+  for(const d of ['n','s','e','w']) drawDoor(d);
+
+  // Player
+  if(phase!=='gameover'){
+    const blink=(phase==='ascending'||phase==='fell')&&Math.floor(frame/8)%2===0;
+    if(!blink){
+      const pw=20,ph=20;
+      r(FCX-pw/2+2,FCY-ph/2+2,pw,ph,P.STONE);
+      r(FCX-pw/2,FCY-ph/2,pw,ph,P.AMBER_DIM,P.AMBER,1);
+      r(FCX-pw/2+2,FCY-ph/2+2,pw-4,4,P.AMBER_LT);
+      r(FCX-pw/2+2,FCY-ph/2+2,4,ph-4,P.AMBER_LT);
+      r(FCX+pw/2-6,FCY-ph/2+4,4,ph-6,P.STONE);
+    }
+  }
+
+  // Flag indicator
+  if(flagMode&&phase==='play'){
+    flagModeAnim=(flagModeAnim+1)%20;
+    if(flagModeAnim<14){ r(ROOM.x+4,ROOM.y+4,52,16,P.STONE); t('FLAG',ROOM.x+30,ROOM.y+12,P.AMBER,7); }
+  } else flagModeAnim=0;
+
+  // Sentry proximity
+  if(phase==='play'&&sentries.length&&sentryFloor===floorNum){
+    const md=Math.min(...sentries.map(s=>Math.abs(s.x-px)+Math.abs(s.y-py)));
+    if(md<=2&&(!( md>1)||Math.floor(frame/8)%2===0)){
+      r(ROOM.x+ROOM.w-74,ROOM.y+4,70,16,P.STONE);
+      glow(P.MM_SEN,4); t(md===1?'! CLOSE !':'NEARBY',ROOM.x+ROOM.w-39,ROOM.y+12,P.MM_SEN,md===1?7:6); glow(0,0);
+    }
+  }
+  // Sentry follow countdown
+  if(phase==='play'&&sentries.length&&sentryFloor<floorNum&&sentryFollowIn>0&&Math.floor(frame/10)%2===0){
+    r(ROOM.x+4,ROOM.y+ROOM.h-20,ROOM.w-8,16,P.STONE);
+    t(`SENTRY IN ${sentryFollowIn} MOVES`,FCX,ROOM.y+ROOM.h-12,P.MM_SEN,5);
+  }
+
+  // FELL overlay
+  if(phase==='fell'){
+    X.globalAlpha=0.65; r(FL.x,FL.y,FL.w,FL.h,P.PIT); X.globalAlpha=1;
+    glow(P.PIT_GLW,10); t('FELL!',FCX,FCY-18,P.PIT_LT,13); glow(0,0);
+    t(`BACK TO FLOOR ${floorNum}`,FCX,FCY+6,P.TEXT,7);
+    t(falls>1?`${falls} FALLS`:`1 FALL`,FCX,FCY+22,P.DIM,6);
+    t('TAP TO CONTINUE',FCX,FCY+38,P.DIM,6);
+  }
+
+  // ASCENDING overlay
+  if(phase==='ascending'){
+    X.globalAlpha=0.45; r(FL.x,FL.y,FL.w,FL.h,P.STAIR); X.globalAlpha=1;
+    glow(P.STAIR_GLW,10); t(`FLOOR ${floorNum}`,FCX,FCY-18,P.STAIR_LT,11); glow(0,0);
+    t('ASCENDING!',FCX,FCY+6,P.TEXT,8);
+    if(sentries.length&&sentryFloor<floorNum&&sentryFollowIn>0)
+      t(`SENTRY IN ${sentryFollowIn}`,FCX,FCY+24,P.MM_SEN,6);
+    t('TAP TO CONTINUE',FCX,FCY+38,P.DIM,6);
+  }
+
+  // GAME OVER / CAUGHT overlay
+  if(phase==='gameover'||phase==='caught'){
+    X.globalAlpha=0.6; r(FL.x,FL.y,FL.w,FL.h,P.BG); X.globalAlpha=1;
+    const msg=phase==='caught'?'CAUGHT!':'GAME OVER';
+    const col=phase==='caught'?P.MM_SEN:P.PIT_LT;
+    glow(col,8); t(msg,FCX,FCY-22,col,10); glow(0,0);
+    glow(P.AMBER,6); t(`FLOOR ${maxFloor}`,FCX,FCY,P.AMBER_LT,14); glow(0,0);
+    t(`${falls} FALL${falls!==1?'S':''}`,FCX,FCY+20,P.DIM,7);
+    if(newRecordFlag&&Math.floor(frame/12)%2===0){ glow(P.AMBER,6); t('★ NEW RECORD!',FCX,FCY+36,P.AMBER,6); glow(0,0); }
+    else t('TAP TO MENU',FCX,FCY+36,P.DIM,6);
+  }
+}
+
+function drawDoor(d){
+  const [nx,ny]=nb(px,py,d);
+  const ex=inBounds(nx,ny);
+  const cx2=ROOM.x+ROOM.w/2|0, cy2=ROOM.y+ROOM.h/2|0;
+  let tx,ty,tw,th;
+  if(d==='n'){tx=cx2-DW/2|0;ty=ROOM.y;tw=DW;th=WT;}
+  else if(d==='s'){tx=cx2-DW/2|0;ty=ROOM.y+ROOM.h-WT;tw=DW;th=WT;}
+  else if(d==='w'){tx=ROOM.x;ty=cy2-DW/2|0;tw=WT;th=DW;}
+  else{tx=ROOM.x+ROOM.w-WT;ty=cy2-DW/2|0;tw=WT;th=DW;}
+
+  if(!ex){ r(tx,ty,tw,th,P.STONE); return; }
+
+  const nc=cell(nx,ny);
+  const isFlag=cell(px,py).flags[d];
+  if(isFlag){ r(tx,ty,tw,th,P.AMBER_DIM,P.AMBER,2); t('F',tx+tw/2,ty+th/2,P.AMBER,6); return; }
+
+  r(tx,ty,tw,th,P.BG);
+  if(!nc) return;
+
+  const n=pitAdj(nx,ny);
+  const stairLocked = gameMode==='stealth' && !hasKey;
+  if(nc.visited||nc.pitSeen){
+    if(nc.pit){ r(tx,ty,tw,th,P.PIT); t('▼',tx+tw/2,ty+th/2,P.PIT_LT,8); return; }
+    if(nc.stair){
+      r(tx+1,ty+1,tw-2,th-2,null,stairLocked?P.PURPLE_LT:P.STAIR_LT,2);
+      t(stairLocked?'🔒':'▲',tx+tw/2,ty+th/2,stairLocked?P.PURPLE_LT:P.STAIR_LT,stairLocked?7:8);
+      return;
+    }
+    if(nc.key&&!hasKey){ r(tx+1,ty+1,tw-2,th-2,null,P.AMBER,2); t('✦',tx+tw/2,ty+th/2,P.AMBER,8); return; }
+    if(n>0) t(String(n),tx+tw/2,ty+th/2,n>=3?P.PIT_LT:P.DIM,7);
+  } else {
+    // Unvisited — stairs always shown so player knows where to aim
+    if(nc.stair){
+      r(tx+1,ty+1,tw-2,th-2,null,stairLocked?P.PURPLE:P.STAIR,1);
+      t(stairLocked?'🔒':'▲',tx+tw/2,ty+th/2,stairLocked?P.PURPLE_LT:P.STAIR,7);
+      return;
+    }
+    if(n>0) t(String(n),tx+tw/2,ty+th/2,n>=3?P.PIT:P.VERY_DIM,7);
+  }
+}
+
+// ── MINIMAP ───────────────────────────────────────────────────────────
+function drawMinimap(){
+  const cs=6, mw=GS*cs, mh=GS*cs;
+  const mx=SCR.x+SCR.w-mw-6, my=SCR.y+6;
+  r(mx-2,my-2,mw+4,mh+4,P.STONE); r(mx,my,mw,mh,P.MM_UNV);
+  for(let y2=0;y2<GS;y2++) for(let x2=0;x2<GS;x2++){
+    const cc=cell(x2,y2); if(!cc) continue;
+    const isCur=x2===px&&y2===py;
+    let col=P.MM_UNV;
+    if(isCur)                        col=P.MM_CUR;
+    else if(cc.pit&&cc.pitSeen)      col=P.MM_PIT;
+    else if(cc.stair&&cc.visited)    col=P.MM_STR;
+    else if(cc.stair&&stairRevealed) col=Math.floor(frame/14)%2===0?P.MM_STR:P.MM_UNV;
+    else if(cc.visited)              col=P.MM_VIS;
+    // Sentry: same colour as visited so it's subtle
+    const hasSen=sentries.some(s=>s.x===x2&&s.y===y2)&&sentryFloor===floorNum;
+    if(hasSen) col=P.MM_VIS;
+    r(mx+x2*cs,my+y2*cs,cs-1,cs-1,col);
+    if(isCur) r(mx+x2*cs,my+y2*cs,cs-1,cs-1,null,P.TEXT,1);
+  }
+}
+
+// ── HUD ───────────────────────────────────────────────────────────────
+function drawHUD(){
+  const hy=HUD_Y, hw=BASE_W-40;
+  r(20,hy,hw,80,P.WALL,P.STONE,2); r(22,hy+2,hw-4,2,P.STONE);
+  glow(P.AMBER,5); t(`FLOOR ${floorNum}`,30,hy+14,P.AMBER,9,'left'); glow(0,0);
+  if(gameMode==='stealth'){
+    const keyCol = hasKey ? P.AMBER : P.DIM;
+    glow(hasKey?P.AMBER:0,hasKey?4:0); t(hasKey?'✦ KEY':'✦ NO KEY',30,hy+28,keyCol,6,'left'); glow(0,0);
+  } else {
+    t(`BEST ${maxFloor}`,30,hy+28,P.DIM,6,'left');
+  }
+  if(gameMode==='timed'){
+    const m=Math.floor(timerSecs/60), s=String(timerSecs%60).padStart(2,'0');
+    const col=timerSecs<30?P.PIT_LT:P.TEXT;
+    glow(timerSecs<30?P.PIT_GLW:0,timerSecs<30?5:0); t(`${m}:${s}`,BASE_W-40,hy+14,col,11,'right'); glow(0,0);
+  } else t(`${moveCounter} MOV`,BASE_W-40,hy+14,P.DIM,7,'right');
+  t(`${falls} FALL${falls!==1?'S':''}`,BASE_W-40,hy+28,falls>0?P.PIT_LT:P.DIM,6,'right');
+  // Progress bar
+  const bx=24,by2=hy+36,bw=hw-8,bh=8;
+  r(bx,by2,bw,bh,P.BG);
+  r(bx+1,by2+1,Math.round((bw-2)*visitedSafeCount/totalSafe),bh-2,P.AMBER);
+  // Status
+  let msg='',mc=P.DIM;
+  if(phase==='play'){
+    if(flagMode){ msg='FLAG MODE'; mc=P.AMBER; }
+    else if(gameMode==='stealth'){
+      if(sentries.length){
+        const sd=Math.abs(sentries[0].x-px)+Math.abs(sentries[0].y-py);
+        if(sd<=2){ msg='! SENTRY ALERTED !'; mc=P.MM_SEN; }
+        else if(!hasKey){ msg='✦ FIND THE KEY'; mc=P.AMBER; }
+        else { msg='▲ REACH THE STAIRS'; mc=P.STAIR_LT; }
+      } else {
+        msg=!hasKey?'✦ FIND THE KEY':'▲ REACH THE STAIRS';
+        mc=!hasKey?P.AMBER:P.STAIR_LT;
+      }
+    } else if(sentries.length&&sentryFloor===floorNum){
+      const d=Math.min(...sentries.map(s=>Math.abs(s.x-px)+Math.abs(s.y-py)));
+      msg=`SENTRY ${d} AWAY`; mc=d<=2?P.MM_SEN:P.DIM;
+    } else {
+      const np=pitCount(floorNum); msg=floorNum===1?'SAFE FLOOR — FIND STAIRS':`${np} PITFALL${np!==1?'S':''} ON THIS FLOOR`; mc=P.DIM;
+    }
+  }
+  t(msg,BASE_W/2,hy+56,mc,6); t('TAP=FLAG  SWIPE=MOVE',BASE_W/2,hy+70,P.VERY_DIM,5);
+}
+
+// ── GAME CONTROLS ─────────────────────────────────────────────────────
+function drawControls(){
+  const cy=BASE_H-90, dcx=88;
+  const arm=40,gap=2;
+  const dpad=[{dx:0,dy:-1,x:dcx-arm/2,y:cy-arm-gap,w:arm,h:arm,l:'▲'},
+              {dx:0,dy:1,x:dcx-arm/2,y:cy+gap,w:arm,h:arm,l:'▼'},
+              {dx:-1,dy:0,x:dcx-arm*1.5-gap,y:cy-arm/2,w:arm,h:arm,l:'◄'},
+              {dx:1,dy:0,x:dcx+arm/2+gap,y:cy-arm/2,w:arm,h:arm,l:'►'}];
+  dpad.forEach(b=>{
+    r(b.x,b.y,b.w,b.h,P.WALL,P.STONE,2); t(b.l,b.x+b.w/2,b.y+b.h/2,P.DIM,10);
+    gameBtns['d'+b.l]={x:b.x,y:b.y,w:b.w,h:b.h,fn:()=>doMove(b.dx,b.dy)};
+  });
+  r(dcx-arm/2,cy-arm/2,arm,arm,P.STONE);
+  // Flag + menu
+  const fx=BASE_W-80,fy=cy-18;
+  r(fx,fy,60,30,flagMode?P.AMBER_DIM:P.WALL,P.STONE,2);
+  t(flagMode?'FLAG ✓':'FLAG',fx+30,fy+15,flagMode?P.AMBER:P.DIM,7);
+  gameBtns['flg']={x:fx,y:fy,w:60,h:30,fn:()=>{ flagMode=!flagMode; }};
+  r(fx,fy+36,60,24,P.WALL,P.STONE,2); t('MENU',fx+30,fy+48,P.DIM,6);
+  gameBtns['mnu']={x:fx,y:fy+36,w:60,h:24,fn:()=>{ screen='title'; stopTimer(); flagMode=false; }};
+}
+
+// ── DRAW GAME ────────────────────────────────────────────────────────
+function drawGame(){
+  r(0,0,BASE_W,BASE_H,P.BG); r(10,10,BASE_W-20,BASE_H-20,P.SHELL,P.STONE,2);
+  r(SCR.x-4,SCR.y-4,SCR.w+8,SCR.h+8,P.STONE);
+  r(SCR.x,SCR.y,SCR.w,SCR.h,P.WALL);
+  r(SCR.x+6,SCR.y+6,SCR.w-12,SCR.h-12,P.FLOOR_BG);
+  drawRoom(); drawMinimap(); drawHUD(); drawControls();
+}
+
+// ── MAIN LOOP ─────────────────────────────────────────────────────────
+function tick(){
+  frame++; X.clearRect(0,0,BASE_W,BASE_H);
+  if(screen==='title') drawTitle();
+  else if(screen==='records') drawRecords();
+  else if(screen==='game') drawGame();
+  // Scanlines
+  X.globalAlpha=0.035; for(let y=0;y<BASE_H;y+=2) r(0,y,BASE_W,1,'#000'); X.globalAlpha=1;
+  requestAnimationFrame(tick);
+}
+
+loadRecords();
+tick();
+
+if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('sw-pt.js'));
+</script>
+</body>
+</html>

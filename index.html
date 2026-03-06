@@ -50,13 +50,14 @@ const P = {
 
 // ── LAYOUT ───────────────────────────────────────────────────────────
 const SCR  = { x:20,  y:50,  w:320, h:340 };
-const ROOM = { x:SCR.x+20, y:SCR.y+18, w:SCR.w-40, h:SCR.h-32 };
-const WT   = 28;
+const PEEK = 30;
+const ROOM = { x:SCR.x+PEEK, y:SCR.y+PEEK, w:SCR.w-PEEK*2, h:SCR.h-PEEK*2 };
+const WT   = 20;
 const FL   = { x:ROOM.x+WT, y:ROOM.y+WT, w:ROOM.w-WT*2, h:ROOM.h-WT*2 };
 const FCX  = ROOM.x+ROOM.w/2|0;
 const FCY  = ROOM.y+ROOM.h/2|0;
 const HUD_Y = SCR.y + SCR.h + 8;
-const DW   = 26;
+const DW   = 58;
 
 // ── GAME CONFIG ───────────────────────────────────────────────────────
 const GS = 8;
@@ -385,7 +386,8 @@ C.addEventListener('touchend',e=>{
       const ang=Math.atan2(dy,dx)*180/Math.PI;
       let mdx=0,mdy=0;
       if(ang>-45&&ang<=45) mdx=1; else if(ang>45&&ang<=135) mdy=1; else if(ang>135||ang<=-135) mdx=-1; else mdy=-1;
-      if(hFired||flagMode){ doFlag(mdx,mdy); flagMode=false; } else doMove(mdx,mdy);
+      if(flagMode){ doFlag(mdx,mdy); flagMode=false; }
+      else doMove(mdx,mdy);
     }
   }
 },{passive:false});
@@ -477,44 +479,86 @@ function drawRecords(){
 }
 
 // ── ROOM DRAWING ─────────────────────────────────────────────────────
+function drawPeekStrip(d){
+  // Draw a darkened peek into neighbouring room — silhouettes only, no info
+  const [nx,ny]=nb(px,py,d);
+  if(!inBounds(nx,ny)) return;
+  const nc=cell(nx,ny);
+
+  // Peek area rect (the PEEK strip on each side of SCR, outside ROOM)
+  let px2,py2,pw,ph;
+  if(d==='n'){ px2=SCR.x; py2=SCR.y;               pw=SCR.w; ph=PEEK; }
+  else if(d==='s'){ px2=SCR.x; py2=ROOM.y+ROOM.h; pw=SCR.w; ph=PEEK; }
+  else if(d==='w'){ px2=SCR.x; py2=SCR.y;           pw=PEEK; ph=SCR.h; }
+  else {            px2=ROOM.x+ROOM.w; py2=SCR.y;   pw=PEEK; ph=SCR.h; }
+
+  // Dark fog fill
+  r(px2,py2,pw,ph,P.BG);
+  X.globalAlpha=0.55; r(px2,py2,pw,ph,'#000'); X.globalAlpha=1;
+
+  const pcx=px2+pw/2|0, pcy=py2+ph/2|0;
+
+  // Sentry silhouette — only clue visible through the fog
+  const hasSen = sentries.some(s=>s.x===nx&&s.y===ny) && sentryFloor===floorNum;
+  if(hasSen){
+    const pulse=0.5+0.5*Math.abs(Math.sin(frame*0.08));
+    X.globalAlpha=0.35+0.2*pulse;
+    // Blob silhouette
+    X.fillStyle=P.MM_SEN;
+    X.beginPath(); X.arc(pcx,pcy,8,0,Math.PI*2); X.fill();
+    X.globalAlpha=1;
+    glow(P.MM_SEN, 6+4*pulse);
+    X.fillStyle=P.MM_SEN; X.beginPath(); X.arc(pcx,pcy,4,0,Math.PI*2); X.fill();
+    glow(0,0);
+  }
+}
+
 function drawRoom(){
   const c=cell(px,py); const num=pitAdj(px,py);
 
+  // Draw SCR background first
+  r(SCR.x,SCR.y,SCR.w,SCR.h,P.BG);
+
+  // Peek strips in all 4 directions
+  for(const d of ['n','s','e','w']) drawPeekStrip(d);
+
+  // Room floor
   r(FL.x,FL.y,FL.w,FL.h,P.FLOOR_BG);
   // Walls
-  r(ROOM.x,ROOM.y,ROOM.w,WT,P.WALL); r(ROOM.x,ROOM.y+ROOM.h-WT,ROOM.w,WT,P.WALL);
-  r(ROOM.x,ROOM.y,WT,ROOM.h,P.WALL); r(ROOM.x+ROOM.w-WT,ROOM.y,WT,ROOM.h,P.WALL);
-  // Stone texture
+  r(ROOM.x,ROOM.y,ROOM.w,WT,P.WALL);
+  r(ROOM.x,ROOM.y+ROOM.h-WT,ROOM.w,WT,P.WALL);
+  r(ROOM.x,ROOM.y,WT,ROOM.h,P.WALL);
+  r(ROOM.x+ROOM.w-WT,ROOM.y,WT,ROOM.h,P.WALL);
+  // Stone texture on walls
   X.globalAlpha=0.12;
-  for(let ty=ROOM.y+5;ty<ROOM.y+ROOM.h;ty+=12) for(let tx=ROOM.x+5;tx<ROOM.x+ROOM.w;tx+=12)
-    if(Math.sin(tx*0.4+ty*0.6)>0.65) r(tx,ty,3,3,P.STONE);
+  for(let sy=ROOM.y+3;sy<ROOM.y+ROOM.h;sy+=10) for(let sx=ROOM.x+3;sx<ROOM.x+ROOM.w;sx+=10)
+    if(Math.sin(sx*0.4+sy*0.6)>0.65) r(sx,sy,3,3,P.STONE);
   X.globalAlpha=1;
   // Corner blocks
-  [[ROOM.x,ROOM.y],[ROOM.x+ROOM.w-10,ROOM.y],[ROOM.x,ROOM.y+ROOM.h-10],[ROOM.x+ROOM.w-10,ROOM.y+ROOM.h-10]]
-    .forEach(([cx2,cy2])=>r(cx2,cy2,10,10,P.STONE));
+  [[ROOM.x,ROOM.y],[ROOM.x+ROOM.w-8,ROOM.y],[ROOM.x,ROOM.y+ROOM.h-8],[ROOM.x+ROOM.w-8,ROOM.y+ROOM.h-8]]
+    .forEach(([cx2,cy2])=>r(cx2,cy2,8,8,P.STONE));
   // Torch glow
-  const grd=X.createRadialGradient(FCX,FCY,0,FCX,FCY,FL.w*0.8);
-  grd.addColorStop(0,`rgba(192,120,32,${0.08+0.04*Math.abs(Math.sin(frame*0.04))})`);
+  const grd=X.createRadialGradient(FCX,FCY,0,FCX,FCY,FL.w*0.9);
+  grd.addColorStop(0,`rgba(192,120,32,${0.10+0.04*Math.abs(Math.sin(frame*0.04))})`);
   grd.addColorStop(1,'rgba(192,120,32,0)');
   X.fillStyle=grd; X.fillRect(FL.x,FL.y,FL.w,FL.h);
 
   // Floor content
   if(c.pit&&c.pitSeen){
-    X.globalAlpha=0.7; r(FL.x+8,FL.y+8,FL.w-16,FL.h-16,P.PIT); X.globalAlpha=1;
-    glow(P.PIT_GLW,8); t('▼',FCX,FCY,P.PIT_LT,56); glow(0,0);
+    X.globalAlpha=0.7; r(FL.x+6,FL.y+6,FL.w-12,FL.h-12,P.PIT); X.globalAlpha=1;
+    glow(P.PIT_GLW,8); t('▼',FCX,FCY,P.PIT_LT,46); glow(0,0);
   } else if(c.key&&!hasKey){
-    // Key room — amber sparkle
-    glow(P.AMBER,12); t('✦',FL.x+FL.w-28,FL.y+38,P.AMBER,52); glow(0,0);
+    glow(P.AMBER,12); t('✦',FCX,FCY,P.AMBER,46); glow(0,0);
   } else if(c.stair){
-    glow(P.STAIR_GLW,8); t('▲',FL.x+FL.w-28,FL.y+38,P.STAIR_LT,52); glow(0,0);
+    glow(P.STAIR_GLW,8); t('▲',FCX,FCY,P.STAIR_LT,46); glow(0,0);
   } else if(num===0){
     X.globalAlpha=0.08;
-    for(let ty2=FL.y+8;ty2<FL.y+FL.h-4;ty2+=14) for(let tx2=FL.x+8;tx2<FL.x+FL.w-4;tx2+=14) r(tx2,ty2,3,3,P.STONE);
+    for(let sy2=FL.y+6;sy2<FL.y+FL.h-2;sy2+=12) for(let sx2=FL.x+6;sx2<FL.x+FL.w-2;sx2+=12) r(sx2,sy2,3,3,P.STONE);
     X.globalAlpha=1;
   } else {
     X.globalAlpha=0.16; r(FL.x,FL.y,FL.w,FL.h,num>=3?P.PIT:P.STONE); X.globalAlpha=1;
-    X.globalAlpha=0.52; t(String(num),FCX,FCY+2,num>=3?P.PIT_LT:P.TEXT,80); X.globalAlpha=1;
-    X.globalAlpha=0.14; t(String(num),FCX-2,FCY,P.BG,80); X.globalAlpha=1;
+    X.globalAlpha=0.52; t(String(num),FCX,FCY+2,num>=3?P.PIT_LT:P.TEXT,68); X.globalAlpha=1;
+    X.globalAlpha=0.14; t(String(num),FCX-2,FCY,P.BG,68); X.globalAlpha=1;
   }
 
   // Doors
@@ -524,52 +568,53 @@ function drawRoom(){
   if(phase!=='gameover'){
     const blink=(phase==='ascending'||phase==='fell')&&Math.floor(frame/8)%2===0;
     if(!blink){
-      const pw=20,ph=20;
-      r(FCX-pw/2+2,FCY-ph/2+2,pw,ph,P.STONE);
-      r(FCX-pw/2,FCY-ph/2,pw,ph,P.AMBER_DIM,P.AMBER,1);
-      r(FCX-pw/2+2,FCY-ph/2+2,pw-4,4,P.AMBER_LT);
-      r(FCX-pw/2+2,FCY-ph/2+2,4,ph-4,P.AMBER_LT);
-      r(FCX+pw/2-6,FCY-ph/2+4,4,ph-6,P.STONE);
+      const pw2=16,ph2=16;
+      r(FCX-pw2/2+2,FCY-ph2/2+2,pw2,ph2,P.STONE);
+      r(FCX-pw2/2,FCY-ph2/2,pw2,ph2,P.AMBER_DIM,P.AMBER,1);
+      r(FCX-pw2/2+2,FCY-ph2/2+2,pw2-4,3,P.AMBER_LT);
+      r(FCX-pw2/2+2,FCY-ph2/2+2,3,ph2-4,P.AMBER_LT);
     }
   }
 
-  // Flag indicator
+  // Flag mode banner
   if(flagMode&&phase==='play'){
-    flagModeAnim=(flagModeAnim+1)%20;
-    if(flagModeAnim<14){ r(ROOM.x+4,ROOM.y+4,52,16,P.STONE); t('FLAG',ROOM.x+30,ROOM.y+12,P.AMBER,7); }
-  } else flagModeAnim=0;
+    r(ROOM.x+2,ROOM.y+2,80,16,P.STONE,P.AMBER,1);
+    t('⚑ FLAG',ROOM.x+42,ROOM.y+10,P.AMBER,6);
+  }
 
-  // Sentry proximity
+  // Sentry proximity warning (when sentry in same room or 1 away)
   if(phase==='play'&&sentries.length&&sentryFloor===floorNum){
     const md=Math.min(...sentries.map(s=>Math.abs(s.x-px)+Math.abs(s.y-py)));
-    if(md<=2&&(!( md>1)||Math.floor(frame/8)%2===0)){
-      r(ROOM.x+ROOM.w-74,ROOM.y+4,70,16,P.STONE);
-      glow(P.MM_SEN,4); t(md===1?'! CLOSE !':'NEARBY',ROOM.x+ROOM.w-39,ROOM.y+12,P.MM_SEN,md===1?7:6); glow(0,0);
+    if(md<=1){
+      if(Math.floor(frame/6)%2===0){
+        r(ROOM.x+ROOM.w-78,ROOM.y+2,74,16,P.STONE,P.MM_SEN,1);
+        glow(P.MM_SEN,4); t('! CAUGHT !',ROOM.x+ROOM.w-41,ROOM.y+10,P.MM_SEN,6); glow(0,0);
+      }
     }
   }
   // Sentry follow countdown
   if(phase==='play'&&sentries.length&&sentryFloor<floorNum&&sentryFollowIn>0&&Math.floor(frame/10)%2===0){
-    r(ROOM.x+4,ROOM.y+ROOM.h-20,ROOM.w-8,16,P.STONE);
-    t(`SENTRY IN ${sentryFollowIn} MOVES`,FCX,ROOM.y+ROOM.h-12,P.MM_SEN,5);
+    r(ROOM.x+4,ROOM.y+ROOM.h-18,ROOM.w-8,14,P.STONE);
+    t(`SENTRY IN ${sentryFollowIn}`,FCX,ROOM.y+ROOM.h-11,P.MM_SEN,5);
   }
 
   // FELL overlay
   if(phase==='fell'){
     X.globalAlpha=0.65; r(FL.x,FL.y,FL.w,FL.h,P.PIT); X.globalAlpha=1;
-    glow(P.PIT_GLW,10); t('FELL!',FCX,FCY-18,P.PIT_LT,13); glow(0,0);
-    t(`BACK TO FLOOR ${floorNum}`,FCX,FCY+6,P.TEXT,7);
-    t(falls>1?`${falls} FALLS`:`1 FALL`,FCX,FCY+22,P.DIM,6);
-    t('TAP TO CONTINUE',FCX,FCY+38,P.DIM,6);
+    glow(P.PIT_GLW,10); t('FELL!',FCX,FCY-14,P.PIT_LT,11); glow(0,0);
+    t(`BACK TO FLOOR ${floorNum}`,FCX,FCY+4,P.TEXT,6);
+    t(falls>1?`${falls} FALLS`:`1 FALL`,FCX,FCY+18,P.DIM,6);
+    t('TAP TO CONTINUE',FCX,FCY+32,P.DIM,6);
   }
 
   // ASCENDING overlay
   if(phase==='ascending'){
     X.globalAlpha=0.45; r(FL.x,FL.y,FL.w,FL.h,P.STAIR); X.globalAlpha=1;
-    glow(P.STAIR_GLW,10); t(`FLOOR ${floorNum}`,FCX,FCY-18,P.STAIR_LT,11); glow(0,0);
-    t('ASCENDING!',FCX,FCY+6,P.TEXT,8);
+    glow(P.STAIR_GLW,10); t(`FLOOR ${floorNum}`,FCX,FCY-14,P.STAIR_LT,9); glow(0,0);
+    t('ASCENDING!',FCX,FCY+4,P.TEXT,7);
     if(sentries.length&&sentryFloor<floorNum&&sentryFollowIn>0)
-      t(`SENTRY IN ${sentryFollowIn}`,FCX,FCY+24,P.MM_SEN,6);
-    t('TAP TO CONTINUE',FCX,FCY+38,P.DIM,6);
+      t(`SENTRY IN ${sentryFollowIn}`,FCX,FCY+20,P.MM_SEN,6);
+    t('TAP TO CONTINUE',FCX,FCY+34,P.DIM,6);
   }
 
   // GAME OVER / CAUGHT overlay
@@ -577,11 +622,11 @@ function drawRoom(){
     X.globalAlpha=0.6; r(FL.x,FL.y,FL.w,FL.h,P.BG); X.globalAlpha=1;
     const msg=phase==='caught'?'CAUGHT!':'GAME OVER';
     const col=phase==='caught'?P.MM_SEN:P.PIT_LT;
-    glow(col,8); t(msg,FCX,FCY-22,col,10); glow(0,0);
-    glow(P.AMBER,6); t(`FLOOR ${maxFloor}`,FCX,FCY,P.AMBER_LT,14); glow(0,0);
-    t(`${falls} FALL${falls!==1?'S':''}`,FCX,FCY+20,P.DIM,7);
-    if(newRecordFlag&&Math.floor(frame/12)%2===0){ glow(P.AMBER,6); t('★ NEW RECORD!',FCX,FCY+36,P.AMBER,6); glow(0,0); }
-    else t('TAP TO MENU',FCX,FCY+36,P.DIM,6);
+    glow(col,8); t(msg,FCX,FCY-18,col,9); glow(0,0);
+    glow(P.AMBER,6); t(`FLOOR ${maxFloor}`,FCX,FCY,P.AMBER_LT,12); glow(0,0);
+    t(`${falls} FALL${falls!==1?'S':''}`,FCX,FCY+18,P.DIM,6);
+    if(newRecordFlag&&Math.floor(frame/12)%2===0){ glow(P.AMBER,6); t('★ NEW RECORD!',FCX,FCY+32,P.AMBER,6); glow(0,0); }
+    else t('TAP TO MENU',FCX,FCY+32,P.DIM,6);
   }
 }
 
@@ -589,6 +634,7 @@ function drawDoor(d){
   const [nx,ny]=nb(px,py,d);
   const ex=inBounds(nx,ny);
   const cx2=ROOM.x+ROOM.w/2|0, cy2=ROOM.y+ROOM.h/2|0;
+  // Door opening position — centred in wall
   let tx,ty,tw,th;
   if(d==='n'){tx=cx2-DW/2|0;ty=ROOM.y;tw=DW;th=WT;}
   else if(d==='s'){tx=cx2-DW/2|0;ty=ROOM.y+ROOM.h-WT;tw=DW;th=WT;}
@@ -599,30 +645,36 @@ function drawDoor(d){
 
   const nc=cell(nx,ny);
   const isFlag=cell(px,py).flags[d];
-  if(isFlag){ r(tx,ty,tw,th,P.AMBER_DIM,P.AMBER,2); t('F',tx+tw/2,ty+th/2,P.AMBER,6); return; }
+  if(isFlag){
+    r(tx,ty,tw,th,P.AMBER_DIM,P.AMBER,2);
+    // Draw flag symbol as canvas shape — avoid font rendering issues
+    X.fillStyle=P.AMBER; X.beginPath();
+    X.moveTo(tx+tw/2-4,ty+th/2-5); X.lineTo(tx+tw/2+4,ty+th/2-2); X.lineTo(tx+tw/2-4,ty+th/2+1); X.closePath(); X.fill();
+    X.fillRect(tx+tw/2-5,ty+th/2-5,2,10);
+    return;
+  }
 
+  // Open doorway — shows as dark passage into fog
   r(tx,ty,tw,th,P.BG);
   if(!nc) return;
 
   const n=pitAdj(nx,ny);
   const stairLocked = gameMode==='stealth' && !hasKey;
   if(nc.visited||nc.pitSeen){
-    if(nc.pit){ r(tx,ty,tw,th,P.PIT); t('▼',tx+tw/2,ty+th/2,P.PIT_LT,8); return; }
+    if(nc.pit){ r(tx,ty,tw,th,P.PIT); return; }
     if(nc.stair){
-      r(tx+1,ty+1,tw-2,th-2,null,stairLocked?P.PURPLE_LT:P.STAIR_LT,2);
-      t(stairLocked?'🔒':'▲',tx+tw/2,ty+th/2,stairLocked?P.PURPLE_LT:P.STAIR_LT,stairLocked?7:8);
+      r(tx,ty,tw,th,stairLocked?P.STONE:P.BG, stairLocked?P.PURPLE_LT:P.STAIR_LT, 2);
       return;
     }
-    if(nc.key&&!hasKey){ r(tx+1,ty+1,tw-2,th-2,null,P.AMBER,2); t('✦',tx+tw/2,ty+th/2,P.AMBER,8); return; }
-    if(n>0) t(String(n),tx+tw/2,ty+th/2,n>=3?P.PIT_LT:P.DIM,7);
+    if(nc.key&&!hasKey){ r(tx,ty,tw,th,P.BG,P.AMBER,1); return; }
+    if(n>0){ X.globalAlpha=0.7; t(String(n),tx+tw/2,ty+th/2,n>=3?P.PIT_LT:P.DIM,7); X.globalAlpha=1; }
   } else {
-    // Unvisited — stairs always shown so player knows where to aim
     if(nc.stair){
-      r(tx+1,ty+1,tw-2,th-2,null,stairLocked?P.PURPLE:P.STAIR,1);
-      t(stairLocked?'🔒':'▲',tx+tw/2,ty+th/2,stairLocked?P.PURPLE_LT:P.STAIR,7);
+      // Always show stair door indicator (locked or not)
+      r(tx,ty,tw,th,P.BG, stairLocked?P.PURPLE:P.STAIR, 1);
       return;
     }
-    if(n>0) t(String(n),tx+tw/2,ty+th/2,n>=3?P.PIT:P.VERY_DIM,7);
+    if(n>0){ X.globalAlpha=0.45; t(String(n),tx+tw/2,ty+th/2,n>=3?P.PIT:P.VERY_DIM,7); X.globalAlpha=1; }
   }
 }
 
@@ -635,16 +687,16 @@ function drawMinimap(){
     const cc=cell(x2,y2); if(!cc) continue;
     const isCur=x2===px&&y2===py;
     let col=P.MM_UNV;
-    if(isCur)                        col=P.MM_CUR;
-    else if(cc.pit&&cc.pitSeen)      col=P.MM_PIT;
-    else if(cc.stair&&cc.visited)    col=P.MM_STR;
-    else if(cc.stair&&stairRevealed) col=Math.floor(frame/14)%2===0?P.MM_STR:P.MM_UNV;
-    else if(cc.visited)              col=P.MM_VIS;
-    // Sentry: same colour as visited so it's subtle
-    const hasSen=sentries.some(s=>s.x===x2&&s.y===y2)&&sentryFloor===floorNum;
-    if(hasSen) col=P.MM_VIS;
+    if(isCur)                         col=P.MM_CUR;
+    else if(cc.pit&&cc.pitSeen)       col=P.MM_PIT;
+    else if(cc.stair&&cc.visited)     col=P.MM_STR;  // stairs only appear once visited
+    else if(cc.key&&!hasKey&&cc.visited) col=P.AMBER_DIM;
+    else if(cc.visited)               col=P.MM_VIS;
     r(mx+x2*cs,my+y2*cs,cs-1,cs-1,col);
     if(isCur) r(mx+x2*cs,my+y2*cs,cs-1,cs-1,null,P.TEXT,1);
+    // Sentry dot on minimap (only show if on same floor — red flash)
+    const hasSen=sentries.some(s=>s.x===x2&&s.y===y2)&&sentryFloor===floorNum;
+    if(hasSen&&Math.floor(frame/10)%2===0) r(mx+x2*cs,my+y2*cs,cs-1,cs-1,P.MM_SEN);
   }
 }
 
@@ -694,25 +746,46 @@ function drawHUD(){
 }
 
 // ── GAME CONTROLS ─────────────────────────────────────────────────────
+function drawArrow(cx, cy, d, col){
+  const s=10;
+  X.fillStyle=col;
+  X.beginPath();
+  if(d==='n'){ X.moveTo(cx,cy-s); X.lineTo(cx+s,cy+s*0.6); X.lineTo(cx-s,cy+s*0.6); }
+  else if(d==='s'){ X.moveTo(cx,cy+s); X.lineTo(cx+s,cy-s*0.6); X.lineTo(cx-s,cy-s*0.6); }
+  else if(d==='w'){ X.moveTo(cx-s,cy); X.lineTo(cx+s*0.6,cy-s); X.lineTo(cx+s*0.6,cy+s); }
+  else { X.moveTo(cx+s,cy); X.lineTo(cx-s*0.6,cy-s); X.lineTo(cx-s*0.6,cy+s); }
+  X.closePath(); X.fill();
+}
+
 function drawControls(){
-  const cy=BASE_H-90, dcx=88;
-  const arm=40,gap=2;
-  const dpad=[{dx:0,dy:-1,x:dcx-arm/2,y:cy-arm-gap,w:arm,h:arm,l:'▲'},
-              {dx:0,dy:1,x:dcx-arm/2,y:cy+gap,w:arm,h:arm,l:'▼'},
-              {dx:-1,dy:0,x:dcx-arm*1.5-gap,y:cy-arm/2,w:arm,h:arm,l:'◄'},
-              {dx:1,dy:0,x:dcx+arm/2+gap,y:cy-arm/2,w:arm,h:arm,l:'►'}];
+  const cy=BASE_H-86, dcx=80;
+  const arm=42, gap=3;
+  const dpad=[
+    {dx:0,dy:-1, d:'n', x:dcx-arm/2, y:cy-arm-gap,   w:arm, h:arm},
+    {dx:0,dy:1,  d:'s', x:dcx-arm/2, y:cy+gap,        w:arm, h:arm},
+    {dx:-1,dy:0, d:'w', x:dcx-arm*1.5-gap, y:cy-arm/2, w:arm, h:arm},
+    {dx:1,dy:0,  d:'e', x:dcx+arm/2+gap,   y:cy-arm/2, w:arm, h:arm},
+  ];
   dpad.forEach(b=>{
-    r(b.x,b.y,b.w,b.h,P.WALL,P.STONE,2); t(b.l,b.x+b.w/2,b.y+b.h/2,P.DIM,10);
-    gameBtns['d'+b.l]={x:b.x,y:b.y,w:b.w,h:b.h,fn:()=>doMove(b.dx,b.dy)};
+    r(b.x,b.y,b.w,b.h,P.WALL,flagMode?P.AMBER:P.STONE,flagMode?2:1);
+    drawArrow(b.x+b.w/2|0, b.y+b.h/2|0, b.d, flagMode?P.AMBER:P.DIM);
+    gameBtns['d'+b.d]={x:b.x, y:b.y, w:b.w, h:b.h, fn:()=>{
+      if(flagMode){ doFlag(b.dx,b.dy); flagMode=false; }
+      else doMove(b.dx,b.dy);
+    }};
   });
-  r(dcx-arm/2,cy-arm/2,arm,arm,P.STONE);
-  // Flag + menu
-  const fx=BASE_W-80,fy=cy-18;
-  r(fx,fy,60,30,flagMode?P.AMBER_DIM:P.WALL,P.STONE,2);
-  t(flagMode?'FLAG ✓':'FLAG',fx+30,fy+15,flagMode?P.AMBER:P.DIM,7);
-  gameBtns['flg']={x:fx,y:fy,w:60,h:30,fn:()=>{ flagMode=!flagMode; }};
-  r(fx,fy+36,60,24,P.WALL,P.STONE,2); t('MENU',fx+30,fy+48,P.DIM,6);
-  gameBtns['mnu']={x:fx,y:fy+36,w:60,h:24,fn:()=>{ screen='title'; stopTimer(); flagMode=false; }};
+  // Centre nub
+  r(dcx-arm/2+6, cy-arm/2+6, arm-12, arm-12, P.STONE);
+
+  // Flag + menu buttons (right side)
+  const fx=BASE_W-72, fy=cy-arm-gap;
+  r(fx,fy,60,arm,flagMode?P.AMBER_DIM:P.WALL,flagMode?P.AMBER:P.STONE,flagMode?2:1);
+  t(flagMode?'FLAG':'flag',fx+30,fy+arm/2,flagMode?P.AMBER:P.DIM,flagMode?7:6);
+  gameBtns['flg']={x:fx,y:fy,w:60,h:arm,fn:()=>{ flagMode=!flagMode; }};
+
+  r(fx,fy+arm+gap*2,60,arm,P.WALL,P.STONE,1);
+  t('menu',fx+30,fy+arm+gap*2+arm/2,P.DIM,6);
+  gameBtns['mnu']={x:fx,y:fy+arm+gap*2,w:60,h:arm,fn:()=>{ screen='title'; stopTimer(); flagMode=false; }};
 }
 
 // ── DRAW GAME ────────────────────────────────────────────────────────

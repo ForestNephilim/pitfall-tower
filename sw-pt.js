@@ -1,4 +1,4 @@
-const CACHE = 'pitfall-tower-v3';
+const CACHE = 'pitfall-tower-v4';
 const ASSETS = ['/', '/index.html', '/manifest.json', '/icon.png',
   'https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap'];
 self.addEventListener('install', e => {

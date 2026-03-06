@@ -1,7 +1,7 @@
 {
   "name": "Pitfall Tower",
   "short_name": "PitfallTower",
-  "start_url": "./",
+  "start_url": "/",
   "display": "fullscreen",
   "orientation": "portrait",
   "background_color": "#06060e",
